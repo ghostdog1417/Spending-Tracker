@@ -1,20 +1,69 @@
-import json
-import os
+import base64
+import io
 import re
 
-from dotenv import load_dotenv
-from openai import OpenAI
+from PIL import Image, ImageFilter, ImageOps
 
-load_dotenv()
+try:
+    import pytesseract
+except Exception:  # pragma: no cover - optional local dependency
+    pytesseract = None
 
 ALLOWED_CATEGORIES = {"Food", "Travel", "Shopping", "Others"}
 
+CATEGORY_KEYWORDS = {
+    "Food": ("burger", "pizza", "coffee", "tea", "lunch", "dinner", "breakfast", "meal", "snack", "restaurant", "cafe", "food"),
+    "Travel": ("uber", "ola", "taxi", "cab", "bus", "train", "metro", "fuel", "petrol", "diesel", "travel", "fare"),
+    "Shopping": ("store", "mall", "shop", "market", "clothes", "shirt", "pant", "jeans", "shoes", "shopping"),
+}
 
-def _get_client():
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
+IGNORED_LINE_KEYWORDS = (
+    "subtotal",
+    "total",
+    "grand total",
+    "tax",
+    "vat",
+    "gst",
+    "service charge",
+    "change",
+    "balance",
+    "cash",
+    "card",
+    "payment",
+    "amount due",
+    "amount paid",
+    "discount",
+    "tip",
+)
+
+
+def _decode_image(image_payload):
+    try:
+        raw_bytes = base64.b64decode(image_payload)
+        return Image.open(io.BytesIO(raw_bytes)).convert("RGB")
+    except Exception:
         return None
-    return OpenAI(api_key=api_key)
+
+
+def _preprocess_image(image):
+    grayscale = ImageOps.grayscale(image)
+    grayscale = ImageOps.autocontrast(grayscale)
+    grayscale = grayscale.filter(ImageFilter.SHARPEN)
+
+    if min(grayscale.size) < 1200:
+        grayscale = grayscale.resize((grayscale.width * 2, grayscale.height * 2))
+
+    return grayscale
+
+
+def _extract_text(image):
+    if pytesseract is None:
+        return ""
+
+    try:
+        return pytesseract.image_to_string(_preprocess_image(image), config="--psm 6")
+    except Exception:
+        return ""
 
 
 def _extract_json_block(content):
@@ -57,58 +106,90 @@ def _normalize_payload(payload):
     return {"items": normalized_items}
 
 
-def extract_receipt_data(image_bytes, mime_type="image/jpeg"):
-    client = _get_client()
-    if client is None:
-        return {
-            "error": "OpenAI API key not found.",
-            "details": "Set OPENAI_API_KEY in your environment or .env file to analyze receipts.",
-        }
+def _classify_category(text):
+    lowered = text.lower()
+    for category, keywords in CATEGORY_KEYWORDS.items():
+        if any(keyword in lowered for keyword in keywords):
+            return category
+    return "Others"
 
-    try:
-        response = client.chat.completions.create(
-            model="gpt-4o-mini",
-            response_format={"type": "json_object"},
-            messages=[
-                {
-                    "role": "system",
-                    "content": (
-                        "You extract receipt data. Return valid JSON with this shape only: "
-                        '{"items":[{"name":"string","price":0,"category":"Food|Travel|Shopping|Others"}]}. '
-                        "Use Others when unsure."
-                    ),
-                },
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "text",
-                            "text": (
-                                "Extract each line item and its price from this receipt. "
-                                "Ignore store metadata, taxes, totals, and payment details unless they are item lines."
-                            ),
-                        },
-                        {"type": "image_url", "image_url": {"url": f"data:{mime_type};base64,{image_bytes}"}},
-                    ],
-                },
-            ],
-            max_tokens=1000,
+
+def _clean_name(raw_name):
+    name = re.sub(r"\s+", " ", raw_name or "").strip(" -:|,")
+    name = re.sub(r"\b(?:qty|quantity|x)\s*\d+\b", "", name, flags=re.IGNORECASE)
+    name = re.sub(r"\s+", " ", name).strip(" -:|,")
+    return name or "Unknown Item"
+
+
+def _is_noise_line(line):
+    if not line:
+        return True
+
+    lowered = line.lower()
+    if any(keyword in lowered for keyword in IGNORED_LINE_KEYWORDS):
+        return True
+
+    alnum_count = len(re.sub(r"[^a-z0-9]", "", lowered))
+    return alnum_count < 2
+
+
+def _parse_line_items(text):
+    items = []
+    if not text:
+        return items
+
+    price_pattern = re.compile(r"(?:rs\.?\s*)?(\d[\d,]*(?:\.\d{1,2})?)", re.IGNORECASE)
+
+    for line in text.splitlines():
+        cleaned_line = re.sub(r"\s+", " ", line).strip(" -:|,")
+        if _is_noise_line(cleaned_line):
+            continue
+
+        matches = list(price_pattern.finditer(cleaned_line))
+        if not matches:
+            continue
+
+        price_match = matches[-1]
+        raw_name = cleaned_line[:price_match.start()]
+        name = _clean_name(raw_name)
+
+        try:
+            price = float(price_match.group(1).replace(",", ""))
+        except ValueError:
+            continue
+
+        if not name or name.replace(" ", "").isdigit():
+            name = "Unknown Item"
+
+        items.append(
+            {
+                "name": name,
+                "price": round(price, 2),
+                "category": _classify_category(cleaned_line),
+            }
         )
-    except Exception as exc:
+
+    return items
+
+
+def extract_receipt_data(image_bytes, mime_type="image/jpeg"):
+    image = _decode_image(image_bytes)
+    if image is None:
         return {
-            "error": "Receipt analysis failed.",
-            "details": str(exc),
+            "error": "Could not read the uploaded receipt image.",
+            "details": "Upload a valid JPG or PNG receipt image and try again.",
         }
 
-    content = response.choices[0].message.content
-    json_block = _extract_json_block(content)
+    text = _extract_text(image)
+    items = _parse_line_items(text)
 
-    try:
-        parsed = json.loads(json_block)
-    except json.JSONDecodeError:
+    if not items:
         return {
-            "error": "Could not parse the model response as JSON.",
-            "raw": content,
+            "error": "Could not extract line items locally.",
+            "details": (
+                "Install pytesseract and the Tesseract OCR engine for better local receipt recognition, "
+                "then upload a clearer receipt image."
+            ),
         }
 
-    return _normalize_payload(parsed)
+    return _normalize_payload({"items": items})

@@ -11,12 +11,12 @@ from utils import process_data
 st.set_page_config(page_title="SmartSpend", layout="wide")
 
 st.title("SmartSpend - Receipt Analyzer")
-st.caption("Upload a receipt image to extract items, organize expenses, and get a quick spending summary.")
+st.caption("Upload a receipt image to extract items locally, organize expenses, and get a quick spending summary.")
 
 with st.sidebar:
     st.header("How it works")
     st.write("1. Upload a clear JPG or PNG receipt image.")
-    st.write("2. SmartSpend extracts item names, prices, and categories.")
+    st.write("2. SmartSpend extracts item names, prices, and categories using local OCR.")
     st.write("3. Review totals, category breakdown, and spending insights.")
 
 uploaded_file = st.file_uploader("Upload your receipt", type=["jpg", "png", "jpeg"])

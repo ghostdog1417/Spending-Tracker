@@ -1,6 +1,5 @@
 streamlit
-openai
-python-dotenv
 pillow
 pandas
 plotly
+pytesseract
