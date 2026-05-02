@@ -301,8 +301,9 @@ def extract_receipt_data(image_bytes, mime_type="image/jpeg"):
     if not items:
         if not _is_tesseract_available():
             details = (
-                "Install pytesseract and the Tesseract OCR engine for better local receipt recognition, "
-                "then restart the app."
+                "Tesseract OCR engine is not available in this runtime. "
+                "For Streamlit Cloud, add packages.txt with tesseract-ocr and tesseract-ocr-eng, "
+                "then redeploy/restart the app."
             )
         else:
             details = "OCR ran, but no line items were detected. Upload a clearer, well-lit receipt image and try again."
